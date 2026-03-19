@@ -6,6 +6,7 @@
 #include "trap.h"
 #include "proc.h"
 
+// Comment
 pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
 
 uint64 sys_write(int fd, uint64 va, uint len)
