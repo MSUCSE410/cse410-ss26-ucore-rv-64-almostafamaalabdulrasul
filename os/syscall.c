@@ -5,6 +5,9 @@
 #include "syscall_ids.h"
 #include "timer.h"
 #include "trap.h"
+#include "proc.h"
+
+pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
 
 uint64 sys_write(int fd, uint64 va, uint len)
 {
@@ -59,6 +62,117 @@ uint64 sys_gettimeofday(uint64 val, int _tz)
 	return 0;
 }
 
+uint64 sys_task_info(TaskInfo *ti)
+{
+	struct proc *p = curr_proc();
+	uint64 pa = useraddr(p->pagetable, (uint64)ti);
+	if (pa == 0)
+		return -1;
+
+	TaskInfo *kti = (TaskInfo *)pa;
+
+	kti->status = Running;
+
+	for (int i = 0; i < MAX_SYSCALL_NUM; i++) {
+		kti->syscall_times[i] = p->syscall_times[i];
+	}
+
+	uint64 now = get_cycle();
+	uint64 start = p->start_cycle;
+
+	kti->time = (int)((now - start) * 1000 / CPU_FREQ);
+	return 0;
+}
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd)
+{
+	struct proc *p = curr_proc();
+	uint64 a, end;
+	int perm = PTE_U;
+
+	(void)flag;
+	(void)fd;
+
+	if (len == 0)
+		return 0;
+
+	if ((start % PGSIZE) != 0)
+		return -1;
+	if ((port & ~0x7) != 0)
+		return -1;
+	if ((port & 0x7) == 0)
+		return -1;
+	if (len > (1UL << 30))
+		return -1;
+
+	a = start;
+	end = PGROUNDUP(start + len);
+
+	if (end < a)
+		return -1;
+	if (end > MAXVA)
+		return -1;
+
+	if (port & 0x1)
+		perm |= PTE_R;
+	if (port & 0x2)
+		perm |= PTE_W;
+	if (port & 0x4)
+		perm |= PTE_X;
+
+	for (uint64 va = a; va < end; va += PGSIZE) {
+		pte_t *pte = walk(p->pagetable, va, 0);
+		if (pte && (*pte & PTE_V))
+			return -1;
+	}
+
+	for (uint64 va = a; va < end; va += PGSIZE) {
+		void *pa = kalloc();
+		if (pa == 0) {
+			uvmunmap(p->pagetable, a, (va - a) / PGSIZE, 1);
+			return -1;
+		}
+		memset(pa, 0, PGSIZE);
+
+		if (mappages(p->pagetable, va, PGSIZE, (uint64)pa, perm) != 0) {
+			kfree(pa);
+			uvmunmap(p->pagetable, a, (va - a) / PGSIZE, 1);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+uint64 sys_munmap(uint64 start, uint64 len)
+{
+	struct proc *p = curr_proc();
+	uint64 a, end;
+
+	if (len == 0)
+		return 0;
+
+	if ((start % PGSIZE) != 0 || (len % PGSIZE) != 0)
+		return -1;
+
+	a = start;
+	end = start + len;
+
+	if (end < a)
+		return -1;
+	if (end > MAXVA)
+		return -1;
+
+	for (uint64 va = a; va < end; va += PGSIZE) {
+		pte_t *pte = walk(p->pagetable, va, 0);
+		if (pte == 0 || (*pte & PTE_V) == 0)
+			return -1;
+	}
+
+	uvmunmap(p->pagetable, a, (end - a) / PGSIZE, 1);
+	return 0;
+}
+
 uint64 sys_getpid()
 {
 	return curr_proc()->pid;
@@ -95,12 +209,27 @@ uint64 sys_wait(int pid, uint64 va)
 uint64 sys_spawn(uint64 va)
 {
 	// TODO: your job is to complete the sys call
-	return -1;
+	
+	struct proc *p = curr_proc();
+    char name[200];
+    copyinstr(p->pagetable, name, va, 200);
+    return spawn(name);
+	
+	//return -1;
 }
 
 uint64 sys_set_priority(long long prio){
     // TODO: your job is to complete the sys call
-    return -1;
+	
+	if (prio < 2)
+        return -1;
+
+    struct proc *p = curr_proc();
+    p->priority = prio;
+    p->pass = BIG_STRIDE / prio;
+    return prio;
+
+    //return -1;
 }
 
 
@@ -114,6 +243,11 @@ void syscall()
 			   trapframe->a3, trapframe->a4, trapframe->a5 };
 	tracef("syscall %d args = [%x, %x, %x, %x, %x, %x]", id, args[0],
 	       args[1], args[2], args[3], args[4], args[5]);
+	// Ch4
+	if (id >= 0 && id < MAX_SYSCALL_NUM) {
+		curr_proc()->syscall_times[id]++;
+	}
+
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], args[1], args[2]);
@@ -129,6 +263,15 @@ void syscall()
 		break;
 	case SYS_gettimeofday:
 		ret = sys_gettimeofday(args[0], args[1]);
+		break;
+	case SYS_task_info:
+		ret = sys_task_info((TaskInfo *)args[0]);
+		break;
+	case SYS_mmap:
+		ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+		break;
+	case SYS_munmap:
+		ret = sys_munmap(args[0], args[1]);
 		break;
 	case SYS_getpid:
 		ret = sys_getpid();
@@ -148,6 +291,9 @@ void syscall()
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
 		break;
+	case SYS_setpriority:
+		ret = sys_set_priority(args[0]);
+	break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
