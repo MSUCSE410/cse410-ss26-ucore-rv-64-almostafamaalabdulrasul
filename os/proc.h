@@ -12,7 +12,7 @@
 
 struct file;
 
-// Saved registers for kernel context switches.
+// Saved registers for kernel context switches. 1
 struct context {
 	uint64 ra;
 	uint64 sp;
