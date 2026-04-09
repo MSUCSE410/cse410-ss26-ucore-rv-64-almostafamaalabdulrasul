@@ -30,7 +30,7 @@ struct proc *curr_proc()
 	return current_proc;
 }
 
-// initialize the proc table at boot time.
+// initialize the proc table at boot time .
 void proc_init()
 {
 	struct proc *p;
